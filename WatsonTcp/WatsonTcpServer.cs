@@ -948,7 +948,7 @@ namespace WatsonTcp
 
                     #endregion
                 }
-1                // AcceptTcpClient throws SocketException if cancelled
+                // AcceptTcpClient throws SocketException if cancelled
                 catch (SocketException)
                 {
                     _Settings.Logger?.Invoke(_Header + "listener stopped");
