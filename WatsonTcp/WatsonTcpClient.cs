@@ -124,6 +124,7 @@ namespace WatsonTcp
         private Stream _DataStream = null;
         private NetworkStream _TcpStream = null;
         private SslStream _SslStream = null;
+        Task _DataReceiver = null;
 
         private X509Certificate2 _SslCertificate = null;
         private X509Certificate2Collection _SslCertificateCollection = null;
@@ -383,7 +384,7 @@ namespace WatsonTcp
             }
 
             _Settings.Logger?.Invoke(_Header + "connected to server, starting data receiver");
-            Task dataReceiver = Task.Run(() => DataReceiver(), _Token);
+            _DataReceiver = Task.Run(() => DataReceiver(), _Token);
 
             _Events.HandleServerConnected(this, EventArgs.Empty);
         }
@@ -409,6 +410,7 @@ namespace WatsonTcp
                     _TokenSource.Cancel();
                 }
             }
+            _DataReceiver?.Wait();
         }
 
         /// <summary>
@@ -887,7 +889,7 @@ namespace WatsonTcp
          
         private async Task DataReceiver()
         {  
-            while (true)
+            while (!_IsStopping)
             {
                 try
                 {
@@ -1069,7 +1071,7 @@ namespace WatsonTcp
 
             _Settings.Logger?.Invoke(_Header + "data receiver terminated for " + _ServerIp + ":" + _ServerPort);
             _Events.HandleServerDisconnected(this, EventArgs.Empty);
-            Dispose();
+            Dispose(true);
         }
 
         private bool SendInternal(WatsonMessage msg, long contentLength, Stream stream)
