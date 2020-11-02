@@ -96,42 +96,57 @@ namespace WatsonTcp
 
         internal void HandleAuthenticationSucceeded(object sender, EventArgs args)
         {
-            AuthenticationSucceeded?.Invoke(sender, args);
+            CatchAndReport(() => AuthenticationSucceeded?.Invoke(sender, args), "AuthenticationSucceeded", sender);
         }
 
         internal void HandleAuthenticationFailure(object sender, EventArgs args)
         {
-            AuthenticationFailure?.Invoke(sender, args);
+            CatchAndReport(() => AuthenticationFailure?.Invoke(sender, args), "AuthenticationFailure", sender);
         }
 
         internal void HandleMessageReceived(object sender, MessageReceivedFromServerEventArgs args)
         {
-            MessageReceived?.Invoke(sender, args);
+            CatchAndReport(() => MessageReceived?.Invoke(sender, args), "MessageReceived", sender);
         }
 
         internal void HandleStreamReceived(object sender, StreamReceivedFromServerEventArgs args)
         {
-            StreamReceived?.Invoke(sender, args);
+            CatchAndReport(() => StreamReceived?.Invoke(sender, args), "StreamReceived", sender);
         }
 
         internal void HandleServerConnected(object sender, EventArgs args)
         {
-            ServerConnected?.Invoke(sender, args);
+            CatchAndReport(() => ServerConnected?.Invoke(sender, args), "ServerConnected", sender);
         }
 
         internal void HandleServerDisconnected(object sender, EventArgs args)
         {
-            ServerDisconnected?.Invoke(sender, args);
+            CatchAndReport(() => ServerDisconnected?.Invoke(sender, args), "ServerDisconnected", sender);
         }
 
         internal void HandleExceptionEncountered(object sender, ExceptionEventArgs args)
         {
-            ExceptionEncountered?.Invoke(sender, args);
+            CatchAndReport(() => ExceptionEncountered?.Invoke(sender, args), "ExceptionEncountered", sender);
         }
 
         #endregion
 
-        #region Private-Methods
+        #region nested
+
+        public void CatchAndReport(Action action, string context, object sender)
+        {
+            Action<string> logger = ((WatsonTcpClient)sender).Settings.Logger;
+            try
+            {
+                action.Invoke();
+            }
+            catch (Exception e)
+            {
+                logger("Exception from " + context + " handler: " + e.Message);
+            }
+        }
+
+
 
         #endregion
     }
