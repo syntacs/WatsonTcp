@@ -128,8 +128,8 @@ namespace WatsonTcp
         private X509Certificate2 _SslCertificate = null;
         private X509Certificate2Collection _SslCertificateCollection = null;
 
-        private SemaphoreSlim _WriteLock = new SemaphoreSlim(1, 1);
-        private SemaphoreSlim _ReadLock = new SemaphoreSlim(1, 1);
+        private object _WriteLock = new object();
+        private bool _IsStopping;
 
         private CancellationTokenSource _TokenSource = new CancellationTokenSource();
         private CancellationToken _Token;
@@ -242,12 +242,11 @@ namespace WatsonTcp
         #region Public-Methods
 
         /// <summary>
-        /// Tear down the client and dispose of background workers.
+        /// Dispose
         /// </summary>
         public void Dispose()
         {
-            Dispose(true); 
-            GC.SuppressFinalize(this);
+            Stop();
         }
 
         /// <summary>
@@ -261,7 +260,7 @@ namespace WatsonTcp
             WaitHandle waitHandle = null;
             bool connectSuccess = false;
 
-            if (!_Events.IsUsingMessages && !_Events.IsUsingStreams) 
+            if (!_Events.IsUsingMessages && !_Events.IsUsingStreams)
                 throw new InvalidOperationException("One of either 'MessageReceived' or 'StreamReceived' events must first be set.");
 
             if (_Keepalive.EnableTcpKeepAlives) EnableKeepalives();
@@ -286,7 +285,7 @@ namespace WatsonTcp
                     }
 
                     _Client.EndConnect(asyncResult);
-                    
+
                     _SourceIp = ((IPEndPoint)_Client.Client.LocalEndPoint).Address.ToString();
                     _SourcePort = ((IPEndPoint)_Client.Client.LocalEndPoint).Port;
                     _TcpStream = _Client.GetStream();
@@ -298,6 +297,8 @@ namespace WatsonTcp
                 catch (Exception e)
                 {
                     _Events.HandleExceptionEncountered(this, new ExceptionEventArgs(e));
+                    // receiver thread not yet running, dispose from here
+                    Dispose(true);
                     throw;
                 }
                 finally
@@ -365,6 +366,8 @@ namespace WatsonTcp
                 catch (Exception e)
                 {
                     _Events.HandleExceptionEncountered(this, new ExceptionEventArgs(e));
+                    // receiver thread not yet running, dispose from here
+                    Dispose(true);
                     throw;
                 }
                 finally
@@ -378,11 +381,34 @@ namespace WatsonTcp
             {
                 throw new ArgumentException("Unknown mode: " + _Mode.ToString());
             }
-             
+
             _Settings.Logger?.Invoke(_Header + "connected to server, starting data receiver");
             Task dataReceiver = Task.Run(() => DataReceiver(), _Token);
 
             _Events.HandleServerConnected(this, EventArgs.Empty);
+        }
+
+        /// <summary>
+        /// Tear down the client and dispose of background workers.
+        /// </summary>
+        public void Stop()
+        {
+            if (Connected)
+            {
+                WatsonMessage msg = new WatsonMessage();
+                msg.Status = MessageStatus.Disconnecting;
+                SendInternal(msg, 0, null);
+            }
+
+            if (_TokenSource != null)
+            {
+                _IsStopping = true;
+                // stop the data receiver
+                if (!_TokenSource.IsCancellationRequested)
+                {
+                    _TokenSource.Cancel();
+                }
+            }
         }
 
         /// <summary>
@@ -827,54 +853,23 @@ namespace WatsonTcp
             {
                 try
                 {
-                    _Settings.Logger?.Invoke(_Header + "disposing");
-
-                    if (Connected)
-                    {
-                        WatsonMessage msg = new WatsonMessage();
-                        msg.Status = MessageStatus.Disconnecting;
-                        SendInternal(msg, 0, null);
-                    }
-
-                    if (_TokenSource != null)
-                    {
-                        // stop the data receiver
-                        if (!_TokenSource.IsCancellationRequested)
-                        {
-                            _TokenSource.Cancel();
-                            _TokenSource.Dispose();
-                        }
-                    }
-
-                    if (_WriteLock != null)
-                    {
-                        _WriteLock.Dispose(); 
-                    }
-
-                    if (_ReadLock != null)
-                    {
-                        _ReadLock.Dispose(); 
-                    }
-
-                    if (_SslStream != null)
-                    {
-                        _SslStream.Close();
-                    }
-
-                    if (_TcpStream != null)
-                    {
-                        _TcpStream.Close();
-                    }
-
-                    if (_Client != null)
-                    {
-                        _Client.Close();
-                        _Client.Dispose(); 
-                    }
-                     
                     Connected = false;
 
+                    _Settings.Logger?.Invoke(_Header + "disposing");
+
+                    _Client?.Close();
+                    _TokenSource?.Dispose();
+                    // set null to make sure it is not referenced again
+                    _TokenSource = null;
+                    _SslStream?.Close();
+                    _SslStream = null;
+                    _TcpStream?.Close();
+                    _TcpStream = null;
+                    _Client?.Dispose();
+                    _Client = null;
+                     
                     _Settings.Logger?.Invoke(_Header + "disposed");
+                    GC.SuppressFinalize(this);
                 }
                 catch (Exception e)
                 {
@@ -894,8 +889,6 @@ namespace WatsonTcp
         {  
             while (true)
             {
-                bool readLocked = false;
-                 
                 try
                 {
                     _Token.ThrowIfCancellationRequested();
@@ -907,10 +900,9 @@ namespace WatsonTcp
                         _Settings.Logger?.Invoke(_Header + "disconnect detected");
                         break;
                     }
-
-                    readLocked = await _ReadLock.WaitAsync(1);
+                    // readLock is not necessary here,just one thread who can access this
                     WatsonMessage msg = new WatsonMessage(_DataStream, (_Settings.DebugMessages ? _Settings.Logger : null));
-                    bool buildSuccess = await msg.BuildFromStream(_Token);
+                    bool buildSuccess = msg.BuildFromStream(_Token);
                     if (!buildSuccess)
                     {
                         _Settings.Logger?.Invoke(_Header + "disconnect detected");
@@ -957,7 +949,7 @@ namespace WatsonTcp
                     if (msg.SyncRequest != null && msg.SyncRequest.Value)
                     { 
                         DateTime expiration = WatsonCommon.GetExpirationTimestamp(msg);
-                        byte[] msgData = await WatsonCommon.ReadMessageDataAsync(msg, _Settings.StreamBufferSize); 
+                        byte[] msgData = WatsonCommon.ReadMessageDataAsync(msg, _Settings.StreamBufferSize); 
                          
                         if (DateTime.Now < expiration)
                         { 
@@ -993,7 +985,7 @@ namespace WatsonTcp
                     { 
                         // No need to amend message expiration; it is copied from the request, which was set by this node
                         // DateTime expiration = WatsonCommon.GetExpirationTimestamp(msg); 
-                        byte[] msgData = await WatsonCommon.ReadMessageDataAsync(msg, _Settings.StreamBufferSize);
+                        byte[] msgData = WatsonCommon.ReadMessageDataAsync(msg, _Settings.StreamBufferSize);
 
                         if (DateTime.Now < msg.Expiration.Value)
                         {
@@ -1013,7 +1005,7 @@ namespace WatsonTcp
 
                         if (_Events.IsUsingMessages)
                         { 
-                            msgData = await WatsonCommon.ReadMessageDataAsync(msg, _Settings.StreamBufferSize); 
+                            msgData = WatsonCommon.ReadMessageDataAsync(msg, _Settings.StreamBufferSize); 
                             MessageReceivedFromServerEventArgs args = new MessageReceivedFromServerEventArgs(msg.Metadata, msgData);
                             await Task.Run(() => _Events.HandleMessageReceived(this, args));
                         }
@@ -1071,10 +1063,6 @@ namespace WatsonTcp
                     _Events.HandleExceptionEncountered(this, new ExceptionEventArgs(e));
                     break;
                 } 
-                finally
-                {
-                    if (readLocked && _ReadLock != null) _ReadLock.Release();
-                }
             }
 
             Connected = false;
@@ -1107,19 +1095,12 @@ namespace WatsonTcp
                     disconnectDetected = true;
                     return false;
                 }
-                  
-                _WriteLock.Wait();
-
-                try
-                { 
+                // same but shorter
+                lock(_WriteLock)
+                {                   
                     SendHeaders(msg); 
                     SendDataStream(contentLength, stream); 
                 }
-                finally
-                {
-                    _WriteLock.Release();
-                }
-
                 _Statistics.IncrementSentMessages();
                 _Statistics.AddSentBytes(contentLength);
                 return true;
@@ -1168,22 +1149,20 @@ namespace WatsonTcp
                     disconnectDetected = true;
                     return false;
                 }
-                 
-                await _WriteLock.WaitAsync();
 
-                try
-                { 
-                    await SendHeadersAsync(msg); 
-                    await SendDataStreamAsync(contentLength, stream); 
-                }
-                finally
+                return await Task<bool>.Run(() =>
                 {
-                    _WriteLock.Release();
-                }
-
-                _Statistics.IncrementSentMessages();
-                _Statistics.AddSentBytes(contentLength);
-                return true;
+                    lock (_WriteLock)
+                    {
+                        // need to send synchoneously. Creating sending threads synchoneously is not enough
+                        //  we have no influence on when the scheduler will run them
+                        SendHeaders(msg);
+                        SendDataStream(contentLength, stream);
+                        _Statistics.IncrementSentMessages();
+                        _Statistics.AddSentBytes(contentLength);
+                        return true;
+                    }
+                });
             }
             catch (Exception e)
             {
@@ -1227,16 +1206,10 @@ namespace WatsonTcp
              
             try
             { 
-                _WriteLock.Wait(); 
-
-                try
+                lock(_WriteLock)
                 {
                     SendHeaders(msg);
                     SendDataStream(contentLength, stream); 
-                }
-                finally
-                {
-                    _WriteLock.Release(); 
                 }
 
                 _Statistics.IncrementSentMessages();
@@ -1271,13 +1244,6 @@ namespace WatsonTcp
             _DataStream.Write(headerBytes, 0, headerBytes.Length);
             _DataStream.Flush();
         }
-
-        private async Task SendHeadersAsync(WatsonMessage msg)
-        {
-            byte[] headerBytes = msg.HeaderBytes; 
-            await _DataStream.WriteAsync(headerBytes, 0, headerBytes.Length);
-            await _DataStream.FlushAsync();
-        }
          
         private void SendDataStream(long contentLength, Stream stream)
         {
@@ -1298,27 +1264,6 @@ namespace WatsonTcp
             } 
 
             _DataStream.Flush(); 
-        }
-
-        private async Task SendDataStreamAsync(long contentLength, Stream stream)
-        {
-            if (contentLength <= 0) return;
-
-            long bytesRemaining = contentLength;
-            int bytesRead = 0;
-            byte[] buffer = new byte[_Settings.StreamBufferSize];
-             
-            while (bytesRemaining > 0)
-            {
-                bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length);
-                if (bytesRead > 0)
-                {
-                    await _DataStream.WriteAsync(buffer, 0, bytesRead);
-                    bytesRemaining -= bytesRead;
-                }
-            }  
-
-            await _DataStream.FlushAsync();
         }
          
         private async Task MonitorForExpiredSyncResponses()

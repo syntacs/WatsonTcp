@@ -69,7 +69,9 @@ namespace Test.WinFormServer
         {
             // If this is called by another thread we have to use Invoke           
             if (this.InvokeRequired)
-                this.Invoke(new _LogDelegate(Logger), new object[] { msg });
+                // if the GUI (main) thread is blocked  (e.g. Console.ReadLine), 
+                //    this needs to be  called asynchroneously, otherwise will deadlock
+                this.BeginInvoke(new _LogDelegate(Logger), new object[] { msg });
             else
                 label1.Text += Environment.NewLine + msg;
         }

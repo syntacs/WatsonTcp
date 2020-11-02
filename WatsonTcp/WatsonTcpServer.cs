@@ -131,8 +131,13 @@ namespace WatsonTcp
         private WatsonTcpStatistics _Statistics = new WatsonTcpStatistics();
         private WatsonTcpKeepaliveSettings _Keepalive = new WatsonTcpKeepaliveSettings();
 
+        private Task _AcceptTask;
+        private Task _IdleMonitorTask;
+        private Task _ExpiredMonitorTask;
+
         private int _Connections = 0;
         private bool _IsListening = false;
+        private bool _IsStopping = false;
 
         private Mode _Mode;
         private string _ListenerIp;
@@ -277,6 +282,8 @@ namespace WatsonTcp
         /// </summary>
         public void Dispose()
         {
+            // stop first in case the server is running
+            Stop();
             Dispose(true);
             GC.SuppressFinalize(this);
         }
@@ -293,7 +300,8 @@ namespace WatsonTcp
             if (_ClientsLastSeen == null) _ClientsLastSeen = new ConcurrentDictionary<string, DateTime>();
             if (_ClientsKicked == null) _ClientsKicked = new ConcurrentDictionary<string, DateTime>();
             if (_ClientsTimedout == null) _ClientsTimedout = new ConcurrentDictionary<string, DateTime>();
-
+            
+            _IsStopping = false;
             _TokenSource = new CancellationTokenSource();
             _Token = _TokenSource.Token;
             _Statistics = new WatsonTcpStatistics();
@@ -317,9 +325,9 @@ namespace WatsonTcp
                 throw new ArgumentException("Unknown mode: " + _Mode.ToString());
             }
 
-            Task.Run(() => AcceptConnections(), _Token); // sets _IsListening
-            Task.Run(() => MonitorForIdleClients(), _Token);
-            Task.Run(() => MonitorForExpiredSyncResponses(), _Token); 
+            _AcceptTask = Task.Run(() => AcceptConnections(), _Token); // sets _IsListening
+            _IdleMonitorTask = Task.Run(() => MonitorForIdleClients(), _Token);
+            _ExpiredMonitorTask = Task.Run(() => MonitorForExpiredSyncResponses(), _Token); 
         }
 
         /// <summary>
@@ -361,7 +369,7 @@ namespace WatsonTcp
 
             Task.Run(() => MonitorForIdleClients(), _Token);
             Task.Run(() => MonitorForExpiredSyncResponses(), _Token);
-            return AcceptConnections(); 
+            return Task.Run(() => AcceptConnections()); 
         }
 
         /// <summary>
@@ -373,9 +381,14 @@ namespace WatsonTcp
 
             try
             {
+                _IsStopping = true;
                 _IsListening = false;
                 _Listener.Stop();
                 _TokenSource.Cancel();
+                // wait until all threads are gone, in case Dispose() is called right after this
+                _AcceptTask.Wait();
+                _IdleMonitorTask.Wait();
+                _ExpiredMonitorTask.Wait();
 
                 _Settings.Logger?.Invoke(_Header + "stopped");
             }
@@ -841,14 +854,14 @@ namespace WatsonTcp
             return _Settings.AcceptInvalidCertificates;
         }
 
-        private async Task AcceptConnections()
+        private void AcceptConnections()
         {
             #region Accept-Connections
 
             _IsListening = true;
             _Listener.Start();
 
-            while (true)
+            while (!_IsStopping)
             {
                 string ipPort = String.Empty;
 
@@ -871,7 +884,7 @@ namespace WatsonTcp
 
                     #region Accept-Connection-and-Validate-IP
 
-                    TcpClient tcp = await _Listener.AcceptTcpClientAsync();
+                    TcpClient tcp = _Listener.AcceptTcpClient();
                     tcp.LingerState.Enabled = false;
 
                     string clientIp = ((IPEndPoint)tcp.Client.RemoteEndPoint).Address.ToString();
@@ -935,7 +948,8 @@ namespace WatsonTcp
 
                     #endregion
                 }
-                catch (ObjectDisposedException)
+1                // AcceptTcpClient throws SocketException if cancelled
+                catch (SocketException)
                 {
                     _Settings.Logger?.Invoke(_Header + "listener stopped");
                     break;
@@ -1030,7 +1044,7 @@ namespace WatsonTcp
             #region Start-Data-Receiver
 
             _Settings.Logger?.Invoke(_Header + "starting data receiver for " + client.IpPort);
-            Task.Run(async () => await DataReceiver(client), client.Token);
+            Task.Run(() => DataReceiver(client), client.Token);
 
             _Events.HandleClientConnected(this, new ClientConnectedEventArgs(client.IpPort));
 
@@ -1111,9 +1125,9 @@ namespace WatsonTcp
             }
         }
 
-        private async Task DataReceiver(ClientMetadata client)
+        private void DataReceiver(ClientMetadata client)
         { 
-            while (true)
+            while (!_IsStopping)
             {
                 try
                 {
@@ -1122,7 +1136,7 @@ namespace WatsonTcp
                     if (!IsConnected(client)) break;
 
                     WatsonMessage msg = new WatsonMessage(client.DataStream, (_Settings.DebugMessages ? _Settings.Logger : null));
-                    bool buildSuccess = await msg.BuildFromStream(client.Token);
+                    bool buildSuccess = msg.BuildFromStream(client.Token);
                     if (!buildSuccess)
                     {
                         _Settings.Logger?.Invoke(_Header + "disconnect detected for client " + client.IpPort);
@@ -1131,7 +1145,7 @@ namespace WatsonTcp
 
                     if (msg == null)
                     {
-                        await Task.Delay(30);
+                        Task.Delay(30);
                         continue;
                     }
                      
@@ -1212,7 +1226,7 @@ namespace WatsonTcp
                     if (msg.SyncRequest != null && msg.SyncRequest.Value)
                     { 
                         DateTime expiration = WatsonCommon.GetExpirationTimestamp(msg);
-                        byte[] msgData = await WatsonCommon.ReadMessageDataAsync(msg, _Settings.StreamBufferSize);
+                        byte[] msgData = WatsonCommon.ReadMessageDataAsync(msg, _Settings.StreamBufferSize);
                           
                         if (DateTime.Now < expiration)
                         { 
@@ -1248,7 +1262,7 @@ namespace WatsonTcp
                     { 
                         // No need to amend message expiration; it is copied from the request, which was set by this node
                         // DateTime expiration = WatsonCommon.GetExpirationTimestamp(msg); 
-                        byte[] msgData = await WatsonCommon.ReadMessageDataAsync(msg, _Settings.StreamBufferSize);
+                        byte[] msgData = WatsonCommon.ReadMessageDataAsync(msg, _Settings.StreamBufferSize);
 
                         if (DateTime.Now < msg.Expiration.Value)
                         {
@@ -1268,9 +1282,9 @@ namespace WatsonTcp
 
                         if (_Events.IsUsingMessages)
                         { 
-                            msgData = await WatsonCommon.ReadMessageDataAsync(msg, _Settings.StreamBufferSize); 
+                            msgData = WatsonCommon.ReadMessageDataAsync(msg, _Settings.StreamBufferSize); 
                             MessageReceivedFromClientEventArgs mr = new MessageReceivedFromClientEventArgs(client.IpPort, msg.Metadata, msgData);
-                            await Task.Run(() => _Events.HandleMessageReceived(this, mr));
+                            Task.Run(() => _Events.HandleMessageReceived(this, mr));
                         }
                         else if (_Events.IsUsingStreams)
                         {
@@ -1283,7 +1297,7 @@ namespace WatsonTcp
                                 sr = new StreamReceivedFromClientEventArgs(client.IpPort, msg.Metadata, msg.ContentLength, ws);
                                 // sr = new StreamReceivedFromClientEventArgs(client.IpPort, msg.Metadata, msg.ContentLength, msg.DataStream);
                                 // must run synchronously, data exists in the underlying stream
-                                _Events.HandleStreamReceived(this, sr); 
+                                Task.Run(() => _Events.HandleStreamReceived(this, sr));
                             }
                             else
                             {
@@ -1292,7 +1306,7 @@ namespace WatsonTcp
                                 sr = new StreamReceivedFromClientEventArgs(client.IpPort, msg.Metadata, msg.ContentLength, ws);
                                 // sr = new StreamReceivedFromClientEventArgs(client.IpPort, msg.Metadata, msg.ContentLength, ms);
                                 // data has been read, can continue to next message
-                                await Task.Run(() => _Events.HandleStreamReceived(this, sr));
+                                Task.Run(() => _Events.HandleStreamReceived(this, sr));
                             } 
                         }
                         else
@@ -1529,16 +1543,21 @@ namespace WatsonTcp
         }
           
         private async Task MonitorForIdleClients()
-        { 
-            while (!_Token.IsCancellationRequested)
+        {
+            try
             {
-                if (_Settings.IdleClientTimeoutSeconds > 0 && _ClientsLastSeen.Count > 0)
+                while (!_Token.IsCancellationRequested)
                 {
-                    MonitorForIdleClientsTask();
-                }
+                    if (_Settings.IdleClientTimeoutSeconds > 0 && _ClientsLastSeen.Count > 0)
+                    {
+                        MonitorForIdleClientsTask();
+                    }
 
-                await Task.Delay(5000, _Token);
+                    await Task.Delay(5000, _Token);
+                }
             }
+            // catch here, otherwise this exception will be routed into the Wait() call in Stop()
+            catch (TaskCanceledException) { }
         }
 
         private void MonitorForIdleClientsTask()
@@ -1560,33 +1579,37 @@ namespace WatsonTcp
         {
             _ClientsLastSeen.AddOrUpdate(ipPort, DateTime.Now, (key, value) => DateTime.Now);
         }
-         
+
         private async Task MonitorForExpiredSyncResponses()
         {
-            while (!_TokenSource.IsCancellationRequested)
+            try
             {
-                if (_Token.IsCancellationRequested) break;
-
-                await Task.Delay(1000);
-
-                lock (_SyncResponseLock)
+                while (!_TokenSource.IsCancellationRequested)
                 {
-                    if (_SyncResponses.Any(s => 
-                        s.Value.ExpirationUtc < DateTime.Now
-                        ))
-                    {
-                        Dictionary<string, SyncResponse> expired = _SyncResponses.Where(s => 
-                            s.Value.ExpirationUtc < DateTime.Now
-                            ).ToDictionary(dict => dict.Key, dict => dict.Value);
+                    if (_Token.IsCancellationRequested) break;
 
-                        foreach (KeyValuePair<string, SyncResponse> curr in expired)
+                    await Task.Delay(1000);
+
+                    lock (_SyncResponseLock)
+                    {
+                        if (_SyncResponses.Any(s =>
+                            s.Value.ExpirationUtc < DateTime.Now
+                            ))
                         {
-                            _Settings.Logger?.Invoke(_Header + "expiring response " + curr.Key.ToString());
-                            _SyncResponses.Remove(curr.Key);
+                            Dictionary<string, SyncResponse> expired = _SyncResponses.Where(s =>
+                                s.Value.ExpirationUtc < DateTime.Now
+                                ).ToDictionary(dict => dict.Key, dict => dict.Value);
+
+                            foreach (KeyValuePair<string, SyncResponse> curr in expired)
+                            {
+                                _Settings.Logger?.Invoke(_Header + "expiring response " + curr.Key.ToString());
+                                _SyncResponses.Remove(curr.Key);
+                            }
                         }
                     }
                 }
             }
+            catch (TaskCanceledException) { }
         }
 
         private SyncResponse GetSyncResponse(string guid, DateTime expirationUtc)

@@ -245,7 +245,7 @@ namespace WatsonTcp
         /// Build the Message object from data that awaits in a NetworkStream or SslStream.
         /// </summary>
         /// <returns>True if successful.</returns>
-        internal async Task<bool> BuildFromStream(CancellationToken token)
+        internal bool BuildFromStream(CancellationToken token)
         {
             // {"len":0,"s":"Normal"}\r\n\r\n
             byte[] headerBytes = new byte[24];
@@ -254,7 +254,7 @@ namespace WatsonTcp
             {
                 #region Read-Headers
 
-                await _DataStream.ReadAsync(headerBytes, 0, 24, token); 
+                _DataStream.ReadAsync(headerBytes, 0, 24, token).Wait(); 
                 byte[] headerBuffer = new byte[1];
 
                 while (true)
@@ -269,7 +269,7 @@ namespace WatsonTcp
                         break;
                     }
 
-                    await _DataStream.ReadAsync(headerBuffer, 0, 1, token);
+                    _DataStream.ReadAsync(headerBuffer, 0, 1, token).Wait();
                     headerBytes = WatsonCommon.AppendBytes(headerBytes, headerBuffer); 
                 }
 

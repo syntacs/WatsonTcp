@@ -72,6 +72,8 @@ namespace TestLargeMessages
             Console.WriteLine("---");
             Console.WriteLine("Press ENTER to exit");
             Console.ReadLine();
+            server.Dispose();
+            client.Dispose();
         }
 
         #region Server-Callbacks

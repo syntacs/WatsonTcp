@@ -91,6 +91,12 @@ namespace TestMultiThread
 
             Console.WriteLine("Press ENTER after completion to view statistics");
             Console.ReadLine();
+            _Client.Stop();
+            _Server.Stop();
+
+
+            _Server.Dispose();
+            _Client.Dispose();
 
             Console.WriteLine("Success: " + _Success);
             Console.WriteLine("Failure: " + _Failure);

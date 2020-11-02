@@ -563,12 +563,17 @@
         </member>
         <member name="M:WatsonTcp.WatsonTcpClient.Dispose">
             <summary>
-            Tear down the client and dispose of background workers.
+            Dispose
             </summary>
         </member>
         <member name="M:WatsonTcp.WatsonTcpClient.Start">
             <summary>
             Start the client and establish a connection to the server.
+            </summary>
+        </member>
+        <member name="M:WatsonTcp.WatsonTcpClient.Stop">
+            <summary>
+            Tear down the client and dispose of background workers.
             </summary>
         </member>
         <member name="M:WatsonTcp.WatsonTcpClient.StartAsync">

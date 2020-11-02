@@ -94,7 +94,7 @@ namespace WatsonTcp
             return ms;
         }
 
-        internal static async Task<byte[]> ReadFromStreamAsync(Stream stream, long count, int bufferLen)
+        internal static byte[] ReadFromStreamAsync(Stream stream, long count, int bufferLen)
         {
             if (count <= 0) return null;
             if (bufferLen <= 0) throw new ArgumentException("Buffer must be greater than zero bytes.");
@@ -109,7 +109,7 @@ namespace WatsonTcp
                 {
                     if (bufferLen > bytesRemaining) buffer = new byte[bytesRemaining];
 
-                    read = await stream.ReadAsync(buffer, 0, buffer.Length);
+                    read = stream.ReadAsync(buffer, 0, buffer.Length).Result;
                     if (read > 0)
                     {
                         ms.Write(buffer, 0, read);
@@ -125,11 +125,11 @@ namespace WatsonTcp
             }
         }
 
-        internal static async Task<byte[]> ReadMessageDataAsync(WatsonMessage msg, int bufferLen)
+        internal static byte[] ReadMessageDataAsync(WatsonMessage msg, int bufferLen)
         {
             if (msg == null) throw new ArgumentNullException(nameof(msg));
             if (msg.ContentLength == 0) return new byte[0]; 
-            return await WatsonCommon.ReadFromStreamAsync(msg.DataStream, msg.ContentLength, bufferLen); 
+            return WatsonCommon.ReadFromStreamAsync(msg.DataStream, msg.ContentLength, bufferLen); 
         }
          
         internal static byte[] AppendBytes(byte[] head, byte[] tail)
